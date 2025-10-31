@@ -97,7 +97,7 @@ def run_kmeans_on_pca_data(
     colors=None,              # רשימת צבעים ידנית (תגבר על cmap)
     dataset_name=None,        # קובע משפחת צבעים לפי הדאטהסט (VCSF/VGMM/VWM)
     cmap=None,
-    random_state=17):
+    random_state=None):
 
 
     # 1) Drop non-numeric columns and perform K-Means with a fixed seed
@@ -153,6 +153,7 @@ def run_kmeans_on_pca_data(
         plt.grid(True)
         plt.tight_layout()
         plt.show()
+        path_fig = f"data/SCHAEFER_mat_cor/csv_out/{title}"
 
     return labels, kmeans, pca_df
 
@@ -437,3 +438,131 @@ def run_kmeans_clustering(
         plt.show()
 
     return labels, data_pca, kmeans, pca
+
+
+def align_clusters_to_previous(
+        current_assignments_df,
+        previous_assignments_df,
+        current_cluster_col='cluster',
+        previous_cluster_col='cluster',
+        subject_id_col='subject_id'
+):
+    """
+    Relabels clusters in current_assignments_df to align with the majority cluster
+    from previous_assignments_df, based on overlapping subjects.
+
+    Args:
+        current_assignments_df (pd.DataFrame): DataFrame with current subject_id and cluster.
+        previous_assignments_df (pd.DataFrame): DataFrame with previous subject_id and cluster.
+        ... column names ...
+
+    Returns:
+        pd.Series: New cluster labels aligned to the previous period.
+    """
+
+    # 1. Merge the two assignment DataFrames on subject_id
+    merged = current_assignments_df.merge(
+        previous_assignments_df[[subject_id_col, previous_cluster_col]],
+        on=subject_id_col,
+        how='left',
+        suffixes=('_current', '_prev')
+    )
+
+    # Handle subjects that were NOT in the previous session (assign NaN for prev cluster)
+    merged['Cluster_Prev'] = merged[f'{previous_cluster_col}_prev'].fillna(-1).astype(int)
+
+    # 2. Determine the best mapping from current_label -> previous_label
+    current_labels = merged[f'{current_cluster_col}_current'].unique()
+
+    # Store the mapping: current_label -> most frequent previous_label
+    mapping = {}
+
+    # Keep track of previous labels that have already been 'claimed' by a current label
+    claimed_prev_labels = set()
+
+    # The goal is to maximize the overlap without mapping two current clusters to the same previous cluster
+    # We should iterate through current clusters and pick the *unclaimed* previous cluster they overlap with most
+
+    # We'll calculate the overlap matrix (Current Cluster x Previous Cluster)
+    overlap_matrix = merged.groupby(f'{current_cluster_col}_current')['Cluster_Prev'].value_counts().unstack(
+        fill_value=0)
+
+    # We only care about aligning to the actual cluster labels (0, 1, 2, ...) from the previous session
+    if -1 in overlap_matrix.columns:
+        overlap_matrix = overlap_matrix.drop(columns=[-1])  # Drop the 'not found' column
+
+    # If the previous session had no clusters (e.g. for the 'b' time point), just return the current labels
+    if overlap_matrix.empty:
+        return current_assignments_df[current_cluster_col]
+
+        # Greedy assignment: find the best match and remove the claim
+    temp_matrix = overlap_matrix.copy()
+
+    # Map current_label -> new_label (which is the previous_label)
+    final_mapping = {old: old for old in current_labels}  # Default: no change
+
+    # Iterate for as many clusters as the minimum of the two sets
+    num_clusters_to_map = min(len(overlap_matrix.index), len(overlap_matrix.columns))
+
+    for _ in range(num_clusters_to_map):
+        # Find the max overlap cell (row=current_label, col=previous_label)
+        max_val = temp_matrix.max().max()
+        if max_val == 0:
+            break
+
+        # Get the indices (Current and Previous labels)
+        max_idx = temp_matrix[temp_matrix == max_val].stack().index[0]
+        current_label, previous_label = max_idx
+
+        # Assign the mapping and record the claim
+        final_mapping[current_label] = previous_label
+
+        # Remove the row (current_label) and column (previous_label) so they can't be chosen again
+        temp_matrix = temp_matrix.drop(index=current_label, errors='ignore')
+        temp_matrix = temp_matrix.drop(columns=previous_label, errors='ignore')
+
+    print(f"\nCluster Alignment Mapping: {final_mapping}")
+
+    # 3. Apply the mapping to the current labels
+    new_labels = merged[f'{current_cluster_col}_current'].map(final_mapping)
+
+    return new_labels.rename(current_cluster_col)
+
+
+
+import pandas as pd
+
+def invert_binary_columns(input_path, output_path, column_names):
+    """
+    Load a file, invert 0↔1 values in the specified columns,
+    and save to a new file.
+
+    Args:
+        input_path (str): Path to the input CSV/XLSX file.
+        output_path (str): Path to save the modified file.
+        column_names (list[str]): List of column names to invert.
+    """
+    # 1. Load file (auto-detect CSV or Excel)
+    if input_path.endswith(".csv"):
+        df = pd.read_csv(input_path)
+    else:
+        df = pd.read_excel(input_path)
+
+    # 2. Validate all requested columns exist
+    missing = [col for col in column_names if col not in df.columns]
+    if missing:
+        raise ValueError(f"Columns not found in file: {missing}")
+
+    # 3. Invert values for each requested column
+    for col in column_names:
+        df[col] = df[col].apply(lambda x: 1 if x == 0 else (0 if x == 1 else x))
+
+    # 4. Save file
+    if output_path.endswith(".csv"):
+        df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    else:
+        df.to_excel(output_path, index=False)
+
+    print(f"✅ File saved to {output_path}")
+
+

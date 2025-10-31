@@ -10,6 +10,9 @@ from clustring_functions import (_palette_from_dataset)
 import matplotlib.colors as mcolors
 import math
 import colorsys
+import matplotlib.pyplot as plt
+from matplotlib.container import BarContainer
+from scipy import stats
 
 GRAY_MISSING = "#9e9e9e"  # gray for subjects not in that period's clusters
 
@@ -559,3 +562,151 @@ def _auto_layout(n, max_cols=3):
     nrows = math.ceil(n / ncols)
     return nrows, ncols
 
+
+
+
+def get_labels_from_file(df, label_col='before'):
+    """מחזיר Series של תוויות קלאסטר מהקובץ (ללא קלאסטרינג מחדש)."""
+    labels = df[label_col].dropna()
+    try:
+        labels = labels.astype(int)
+    except Exception:
+        pass
+    labels.name = 'cluster'
+    return labels
+
+def plot_one_period_with_labels(df, labels, period_name, ax,periods):
+    """מצייר גרף עמודות עבור period_name כשההתאגדות לפי labels (תוויות מהקובץ)."""
+    cols = periods[period_name]
+    block = df.loc[labels.index, cols].join(labels).dropna(subset=cols)
+    if block.empty:
+        ax.axis('off')
+        ax.set_title(f'אין נתונים לתקופה: {period_name}')
+        return
+
+    means  = block.groupby('cluster')[cols].mean().sort_index()
+    stds   = block.groupby('cluster')[cols].std().sort_index()
+    counts = block['cluster'].value_counts().sort_index()
+
+    plot_mean = means.transpose()
+    plot_std  = stds.transpose()
+    plot_mean.plot(kind='bar', ax=ax, rot=0, width=0.7, yerr=plot_std)
+
+    # תיוג רק הבר־קונטיינרים (להתעלם ממכלי errorbars)
+    bar_containers = [c for c in ax.containers if isinstance(c, BarContainer)]
+    for ci, bars in enumerate(bar_containers):
+        m = plot_mean.iloc[:, ci]
+        s = plot_std.iloc[:, ci]
+        for bar, mean_val, std_val in zip(bars.patches, m, s):
+            y = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width()/2,
+                y + 0.05 * ax.get_ylim()[1],
+                f'{mean_val:.2f}\n(STD: {std_val:.2f})',
+                ha='center', va='bottom', fontsize=8
+            )
+
+    ax.set_title(f'Period: {period_name}', fontsize=12)
+    ax.set_xlabel('Variable'); ax.set_ylabel('Average')
+    handles = bar_containers
+    ax.legend(
+        handles=handles,
+        labels=[f'Cluster {k} (N={counts.get(k,0)})' for k in range(len(handles))],
+        title='Cluster'
+    )
+
+def plot_one_period_with_labels_and_ttest(df, labels, period_name, ax, palette, clusters_from_period, t_test_results_df=None,periods= None):
+    """
+    Draws a bar graph and marks with asterisks according to t-test results.
+    """
+    cols = periods[period_name]
+    block = df.loc[labels.index, cols].join(labels).dropna(subset=cols)
+
+    if block.empty:
+        ax.axis('off')
+        ax.set_title(f'No data for period: {period_name}')
+        return
+
+    means = block.groupby('cluster')[cols].mean().sort_index()
+    stds = block.groupby('cluster')[cols].std().sort_index()
+    counts = block['cluster'].value_counts().sort_index()
+    num_clusters = len(counts)
+    cluster_names = counts.index.tolist()
+
+    # Drawing - same colors for each cluster
+    plot_mean = means.transpose()
+    plot_std = stds.transpose()
+    plot_mean.plot(kind='bar', ax=ax, rot=0, width=0.7, yerr=plot_std,
+                   color=palette[:plot_mean.shape[1]])
+
+    # Add cluster size information to the title
+    n_text = " | ".join([f"Cluster {k}: N={counts.get(k, 0)}"
+                         for k in counts.index])
+    ax.set_title(f'{period_name}\n{n_text}', fontsize=11)
+
+    ax.set_xlabel('Variable')
+    ax.set_ylabel('Average')
+
+    # ============ Marking the graph with an asterisk for statistical significance ============
+    if t_test_results_df is not None and not t_test_results_df.empty:
+        results_for_plot = t_test_results_df[
+            (t_test_results_df['clusters_from_period'] == clusters_from_period) &
+            (t_test_results_df['period_shown'] == period_name)
+        ]
+
+        if not results_for_plot.empty:
+            x_ticks = ax.get_xticks()
+            for _, result in results_for_plot.iterrows():
+                p_val_to_check = result.get('p_value')
+                if p_val_to_check is not None:
+                    stars = ''
+                    if p_val_to_check < 0.001:
+                        stars = '***'
+                    elif p_val_to_check < 0.01:
+                        stars = '**'
+                    elif p_val_to_check < 0.05:
+                        stars = '*'
+
+                    if stars:
+                        var = result['variable']
+                        try:
+                            var_index = list(means.columns).index(var)
+                        except ValueError:
+                            continue
+
+                        # Find the maximum height of the bars to place the asterisk
+                        y_pos_cluster0 = means.loc[cluster_names[0], var]
+                        y_pos_cluster1 = means.loc[cluster_names[1], var]
+                        y_max = max(y_pos_cluster0, y_pos_cluster1)
+
+                        # Add asterisk above the highest bar
+                        ax.text(x_ticks[var_index], y_max + 0.1, stars, ha='center', va='bottom',
+                                fontsize=16, color='black', weight='bold')
+
+
+# ========= HELPERS WITH MEAN / STD (ddof=1) =========
+def safe(name: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)
+
+def stats_by_group(df_by_group: dict, col: str) -> pd.DataFrame:
+    """
+    Return per-group stats for column: mean, std (ddof=1), n.
+    Skips groups where the column is missing or all NaN.
+    """
+    rows = []
+    for gname, gdf in df_by_group.items():
+        if col not in gdf.columns:
+            continue
+        s = pd.to_numeric(gdf[col], errors="coerce").dropna()
+        if s.empty:
+            continue
+        rows.append({
+            "group": gname,
+            "mean": s.mean(),
+            "std":  s.std(ddof=1),  # N-1
+            "n":    s.size
+        })
+    if not rows:
+        return pd.DataFrame(columns=["group", "mean", "std", "n"]).set_index("group")
+    out = pd.DataFrame(rows).set_index("group").sort_index()
+    return out

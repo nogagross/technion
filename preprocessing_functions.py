@@ -358,3 +358,26 @@ def prepare_features_and_subjects(features_path, sheet_name_features="Data"):
     Z = scaler.fit_transform(X)
     return X.columns.tolist(), Z, subj
 
+
+
+
+
+def load_one(path, out_col):
+    """Load a 2-column CSV and rename the cluster column."""
+    df = pd.read_csv(path)
+    # Try to find the cluster column (default is 'Cluster')
+    cluster_col = None
+    for c in df.columns:
+        if c.lower() == "cluster":
+            cluster_col = c
+            break
+    if cluster_col is None:
+        # fallback: take the second column
+        cluster_col = df.columns[1]
+
+    # Keep only Subject_Code + cluster, coerce Subject_Code to string for safe joins
+    df = df.rename(columns={cluster_col: out_col})
+    if "Subject_Code" not in df.columns:
+        raise ValueError(f"'Subject_Code' column not found in {path}")
+    df["Subject_Code"] = df["Subject_Code"].astype(str)
+    return df[["Subject_Code", out_col]]

@@ -5,6 +5,7 @@ from sklearn.neighbors import NearestNeighbors
 #from pyriemann.utils.mean import mean_riemann
 from tqdm import tqdm
 #import torch
+import torch
 
 #region
 def sym_pos_def_dist(A, B, p=2):
@@ -165,14 +166,41 @@ def _riemannian_dist(corrs, eigval_bound=0.01):
 #     return dists.cpu().numpy()
 
 
-def _get_kernel_riemannian(all_distances, sigma_cutoff=9999999, eps=2):
-    closest_distances = np.sort(all_distances)[:, :sigma_cutoff]
-    sigma = eps * np.median(closest_distances)
-    kernel = np.exp(- (all_distances / (np.sqrt(2) * sigma)) ** 2)
-    kernel = (kernel + kernel.T) / 2
-    kernel = _make_row_stochastic(kernel)
-    return kernel
+# def _get_kernel_riemannian(all_distances, sigma_cutoff=9999999, eps=2):
+#     closest_distances = np.sort(all_distances)[:, :sigma_cutoff]
+#     sigma = eps * np.median(closest_distances)
+#     print(f'sigma = {sigma}' )
+#     kernel = np.exp(- (all_distances / (np.sqrt(2) * sigma)) ** 2)
+#     kernel = (kernel + kernel.T) / 2
+#     kernel = _make_row_stochastic(kernel)
+#     return kernel
 
+def _get_kernel_riemannian(all_distances, K_neighbors, eps=1e-5):  # <-- K_neighbors מגיע מ-scale_k
+    K_neighbors = int(K_neighbors)
+    # 1. מיון מרחקים ומציאת המרחק של השכן ה-K-י (זה ה-Sigma האדפטיבי)
+    sorted_distances = np.sort(all_distances, axis=1)
+
+    # K_neighbors הוא האינדקס של השכן ה-K-י (בגלל שהמיון מתחיל ב-0)
+    sigma = sorted_distances[:, K_neighbors]
+
+    # ודא שאין חלוקה ב-0
+    sigma[sigma < eps] = eps
+
+    # 2. חישוב מטריצת הזיקה (W) באמצעות הסקאלה המקומית
+    sigma_i = sigma[:, None]
+    sigma_j = sigma[None, :]
+
+    D2 = all_distances ** 2
+    W = np.exp(-D2 / (sigma_i * sigma_j))
+    print(f'sigma_i = {sigma_i}' )
+    print(f'/nsigma_j = {sigma_j}' )
+    print(f'/nsigma_i*sigma_j = {sigma_i*sigma_j}' )
+
+    # 3. סימטריזציה ונירמול (row-stochastic)
+    kernel = (W + W.T) / 2
+    kernel = _make_row_stochastic(kernel)
+
+    return kernel
 
 def _make_row_stochastic(kernel):
     'This does not strictly mean row-stochastic,but normalizes the kernel'
@@ -294,7 +322,7 @@ def get_diffusion_embedding(correlations, window_length, scale_k=20,
         if mode == 'riemannian':
             dists = _riemannian_dist(corrs)
             distances.append(dists)
-            kernel = _get_kernel_riemannian(dists)
+            kernel = _get_kernel_riemannian(dists,K_neighbors = scale_k)
         elif mode == 'euclidean':
             kernel, dists = _get_kernel_euclidean(
                 corrs.reshape(corrs.shape[:-2] + (-1,)), scale_k)
@@ -306,11 +334,12 @@ def get_diffusion_embedding(correlations, window_length, scale_k=20,
         eig, vec = np.linalg.eigh(kernel)
         sort_idx = eig.argsort()[-2::-1]
         vec = vec.T[sort_idx]
+        list_eigen  = eig[sort_idx, None]
         vec = eig[sort_idx, None] * vec
 
         diffusion_representations.append(vec)
 
-    return np.array(diffusion_representations), np.array(distances)
+    return np.array(diffusion_representations), np.array(distances),np.array(list_eigen)
 #endregion
 
 # ---- GPU version of get_diffusion_embedding function ----
@@ -395,3 +424,71 @@ def get_diffusion_embedding(correlations, window_length, scale_k=20,
 #
 #     mean_riemanns = np.array(mean_riemanns)
 #     return mean_riemanns
+
+
+
+
+# --- הכנת נתוני קלט לדוגמה ---
+# יצירת טנזור קלט (נניח 100 דוגמאות, 10 פיצ'רים)
+# חשוב לוודא ש-X מועבר ל-DEVICE הנבחר
+
+# נניח ש-correlation_matrices הוא מערך NumPy או רשימה של מטריצות.
+# המר אותן לטנזור PyTorch:
+# ודא שכל המטריצות הן סימטריות וחיוביות מוגדרות לפני הקלט
+# הפלט יהיה: טנזור הקלט X נמצא על המכשיר: cpu
+def affinity_mat(X, riem=False, K=7, eps=1e-5):
+    """
+    Constructs a self-tuning (locally scaled) affinity matrix in PyTorch,
+    based on Zelnik-Manor & Perona (2004).
+
+    Args:
+        X (torch.Tensor): (n_samples, n_features)
+        K (int): Number of neighbors for local scaling
+        eps (float): Small value to prevent division by zero
+
+    Returns:
+        P (torch.Tensor): Row-normalized affinity matrix (n x n)
+        Dsum (torch.Tensor): Row sums (n x 1)
+        W (torch.Tensor): Raw affinity matrix (n x n)
+    """
+    if riem:
+        # X חייב להיות np.ndarray כדי להיכנס ל- _riemannian_dist
+        # ולכן, אם X הגיע כ-torch.Tensor, יש להמיר אותו:
+        if isinstance(X, torch.Tensor):
+            X_numpy = X.cpu().numpy()
+        else:
+            X_numpy = X
+
+        # 1. חישוב מטריצת המרחקים באמצעות פונקציית NumPy/CPU
+        d_numpy = _riemannian_dist(X_numpy)  # הפלט הוא np.ndarray
+
+        # 2. המרה מיידית בחזרה ל-PyTorch Tensor
+        # משתמשים ב-X.device המקורי של הקלט (אם הוא היה PyTorch) כדי לשמור על עקביות
+        # אם X היה NumPy, נשתמש ב-cpu כברירת מחדל
+        device = X.device if isinstance(X, torch.Tensor) else torch.device("cpu")
+        d = torch.as_tensor(d_numpy, dtype=torch.float32, device=device)
+
+        # 3. המשך חישוב ה-PyTorch
+        D2 = d.pow(2)  # Squared distance matrix
+        D2 = 0.5 * (D2 + D2.transpose(0, 1))
+        D = torch.sqrt(D2 + 1e-12)
+        # else:
+        # ... (אם אתה רוצה להוסיף את גרסת ה-Euclidean PyTorch)
+
+        # Step 2: Local scaling using K-th nearest neighbor distances
+    sorted_D, _ = torch.sort(D, dim=1)
+    sigma = sorted_D[:, K]  # (n,)
+    # ודא ש-eps מומר לטנזור על המכשיר הנכון
+    eps_t = torch.tensor(eps, device=D.device)
+    sigma = torch.where(sigma < eps, eps_t, sigma)
+
+    # ... המשך הקוד ללא שינוי
+    sigma_i = sigma[:, None]
+    sigma_j = sigma[None, :]
+
+    W = torch.exp(-D2 / (sigma_i * sigma_j))
+
+    Dsum = W.sum(dim=1, keepdim=True)
+    P = W / Dsum
+
+    return P, Dsum, W, D2
