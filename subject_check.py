@@ -617,8 +617,8 @@ def main():
         )
     add_atlas_flags(
         sessions_csv=r"subject_sessions_mri.csv",  # your subject-session file
-        schaefer_dir=r"data/SCHAEFER_mat_cor-20251029T073809Z-1-001",
-        yeo_dir="data/YEO_mat_cor-20251029T073741Z-1-001",
+        schaefer_dir=r"data/SCHAEFER_mat_cor",
+        yeo_dir="data/YEO_mat_cor",
         output_csv=r"subject_sessions_mri_with_atlases.csv",
         subject_col="subject_code",  # or "Subject_Code" if that's your header
         session_col="session",  # e.g., values like 'ses-1', 'ses-2'

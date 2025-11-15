@@ -863,7 +863,7 @@ def main():
     # ========= INPUTS =========
     # A note on file paths: The script assumes your working directory is the same as the
     # one where the script runs. If this is not the case, make sure the paths are absolute.
-    file_path = "data/only_Q_outputs/filtered_merged_data_with _trajectory.csv"
+    file_path = "data/q_data/5_timepoints/filtered_merged_data_with _trajectory.csv"
     out_dir = Path("data/only_Q_outputs/charts_configurable")
     out_dir.mkdir(parents=True, exist_ok=True)
 

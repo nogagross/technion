@@ -74,3 +74,34 @@ def export_questionnaire(df, prefix, filename):
     print(', '.join(selected_columns))
 
 
+
+def export_questionnaire_combined(df, prefix, filename):
+    # סינון עמודות שמתחילות ב-prefix
+    df_sub = df
+
+
+    # הסרת נבדקות שאין להן אף ערך בטווח העמודות האלה
+    df_sub = df_sub.dropna(how='any')
+
+    # אם אין נתונים, מדלגים
+    if df_sub.empty:
+        print(f"⚠️ אין נבדקות עם נתונים עבור {prefix}")
+        return
+
+
+    # חישוב כמות ואחוזים
+    counts = df_sub.notna().sum()
+    total = len(df_sub)
+    percentages = (counts / total * 100).round(2)
+
+    # טבלת סיכום
+    summary_df = pd.DataFrame([counts, percentages], index=['number of subjects', '% of subjects'])
+
+    # כתיבה לשני גיליונות באקסל
+    df_sub.to_csv(f"{filename}.csv")
+
+    # ✅ הדפסה
+    print(f"\n✅ נוצר הקובץ: {filename}.csv")
+    print(f"📌 מספר נבדקות בקובץ: {total}")
+
+

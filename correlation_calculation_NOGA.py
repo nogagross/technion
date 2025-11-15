@@ -1,3 +1,5 @@
+
+import numpy as np
 def corrcoef_safe(W):
     """
     Correlation where zero-variance columns are handled, then regularize to SPD.

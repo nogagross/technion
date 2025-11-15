@@ -31,7 +31,7 @@ def plot_grouped_bars(groups, s1, s2, s3,
                       s3_label="Column 3",
                       title="Grouped Bar Chart: 3 Groups × 3 Columns",
                       ylabel="Value",
-                      annotate=True):
+                      annotate=True,max_y = 100):
     """
     groups : list[str] of length 3 – group names (e.g., ["G1", "G2", "G3", "G4", "G5"])
     s1, s2, s3 : list[float] each of length 5 – values for the 3 bars in each group
@@ -59,7 +59,7 @@ def plot_grouped_bars(groups, s1, s2, s3,
     # Formatting
     ax.set_title(title)
     ax.set_ylabel(ylabel)
-    ax.set_ylim(0,120)
+    ax.set_ylim(0,max_y)
     ax.set_xticks(x, groups)
     ax.grid(axis='y', linestyle='--', alpha=0.4)
     # Legend בטור אנכי בצד ימין
@@ -710,3 +710,63 @@ def stats_by_group(df_by_group: dict, col: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["group", "mean", "std", "n"]).set_index("group")
     out = pd.DataFrame(rows).set_index("group").sort_index()
     return out
+
+
+def plot_subject_trajectories(
+        csv_path: str,
+        subjects: list[str],
+        timepoints: list[str] = ["before", "t1", "t2", "t3", "after"],
+        subject_col: str = "Subject_Code",
+        jitter: float = 0.03,  # vertical jitter to separate identical paths
+        annotate_last: bool = False,
+        title = None,
+        figsize=(9, 5),
+):
+    df = pd.read_csv(csv_path)
+    df[subject_col] = df[subject_col].astype(str)
+
+    # keep only selected subjects & needed columns
+    cols = [subject_col] + timepoints
+    df = df.loc[df[subject_col].isin([str(s) for s in subjects]), cols].copy()
+
+    # long format
+    long = df.melt(id_vars=subject_col, value_vars=timepoints,
+                   var_name="time", value_name="state")
+    long = long.dropna(subset=["state"])
+
+    # enforce order on x
+    tp_to_x = {tp: i for i, tp in enumerate(timepoints)}
+    long["x"] = long["time"].map(tp_to_x).astype(int)
+
+    # ensure numeric (0/1)
+    long["state"] = pd.to_numeric(long["state"], errors="coerce")
+    long = long.dropna(subset=["state"])
+    long["state"] = long["state"].astype(float)
+
+    # jitter by subject so parallel lines are visible
+    subj_to_offset = {s: (i - (len(subjects) - 1) / 2) * jitter for i, s in enumerate(subjects)}
+    long["y"] = long["state"] + long[subject_col].map(subj_to_offset)
+
+    # plot
+    fig, ax = plt.subplots(figsize=figsize)
+    for s in subjects:
+        d = long[long[subject_col] == str(s)].sort_values("x")
+        if d.empty:
+            continue
+        ax.plot(d["x"], d["y"], marker="o", linewidth=2, label=str(s))
+        if annotate_last:
+            ax.text(d["x"].iloc[-1] + 0.05, d["y"].iloc[-1], str(s),
+                    va="center", fontsize=10)
+
+    ax.set_xticks(range(len(timepoints)))
+    ax.set_xticklabels(timepoints)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["0", "1"])
+    ax.set_ylim(-0.4, 1.4)
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Cluster")
+    ax.set_title(title)
+    ax.grid(True, axis="x", alpha=0.3)
+    ax.legend(title="Subject", bbox_to_anchor=(1.02, 1), loc="upper left", frameon=False)
+    plt.tight_layout()
+    plt.show()

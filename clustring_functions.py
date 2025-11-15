@@ -9,7 +9,7 @@ from matplotlib import cm
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score, silhouette_samples
-
+from sklearn.metrics import pairwise_distances
 def _cmap_for_dataset(dataset_name=None, cmap=None):
     """
     בוחר cmap לפי שם הדאטהסט, או לפי cmap שנמסר ידנית.
@@ -254,9 +254,10 @@ def pca_kmeans_minimal_outputs(
     k_range=range(2, 11),
     top_k_features=10,
     random_state=42,
-    save_dir=None,   # למשל: "/content/outputs"
+    save_dir=None,
     subject_id_col='subject_id',
-    save_subjects_csv = None
+    save_subjects_csv = None,
+    save_pca_csv = None  # <-- הוספנו את הפרמטר הזה
 ):
     """
     מפיק:
@@ -272,28 +273,50 @@ def pca_kmeans_minimal_outputs(
       - paths (נתיבי קבצים אם save_dir לא None)
     """
     # 1) בחירת עמודות רלוונטיות
-    data_columns = [
-        c for c in df.columns
-        if c.startswith(prefix) and 'lec' not in c and c != 'Subject_Code'
-    ]
+    if prefix:
+        data_columns = [
+            c for c in df.columns
+            if c.startswith(prefix) and 'lec' not in c and c != 'Subject_Code'
+        ]
+    else:
+        print("Prefix is empty, selecting 'PHQ_' and 'GAD7_' columns explicitly.")
+        data_columns = [
+            c for c in df.columns
+            if (c.startswith('PHQ_') or c.startswith('GAD7_'))
+        ]
     X = df[data_columns].copy()
     if X.empty:
         raise ValueError(f"No valid columns for prefix '{prefix}'")
 
-    # ניקוי
+# ניקוי
     X = X.apply(pd.to_numeric, errors='coerce')
-    X = X.fillna(X.mean())
 
-    # הסרת שונות אפס
-    var0 = X.var()
-    drop_cols = var0[var0 == 0].index.tolist()
-    if drop_cols:
-        X = X.drop(columns=drop_cols)
+    # --- התיקון כאן: מחיקת שורות במקום מילוי ---
+
+    # שמירת מספר השורות המקורי לבדיקה
+    original_row_count = X.shape[0]
+
+    # 2. מחיקת כל שורה שיש בה לפחות ערך חסר (NaN) אחד
+    X = X.dropna()
+
+    # הדפסת סיכום על השורות שנמחקו
+    dropped_row_count = original_row_count - X.shape[0]
+    if dropped_row_count > 0:
+        print(f"Dropped {dropped_row_count} rows (out of {original_row_count}) due to missing values (NaN).")
+        print(f"Continuing analysis with {X.shape[0]} complete rows.")
+
+    # בדיקה למקרה שכל השורות נמחקו
+    if X.empty:
+        raise ValueError("After dropping NaNs, the DataFrame is empty. Cannot proceed.")
+
+    # --- סוף התיקון ---
+
 
     # 2) סטנדרטיזציה
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
 
+    print(Xs)
     # 3) PCA
     max_components = min(X.shape[0], X.shape[1])
     if n_components > max_components:
@@ -301,6 +324,35 @@ def pca_kmeans_minimal_outputs(
     pca = PCA(n_components=n_components, random_state=random_state)
     Z = pca.fit_transform(Xs)  # (n_samples, n_components)
 
+    if save_pca_csv is not None:
+        try:
+            # 1. יצירת שמות עמודות לרכיבי ה-PCA
+            pca_col_names = [f'PC{i + 1}' for i in range(Z.shape[1])]
+
+            # 2. יצירת DataFrame מהרכיבים
+            pca_df = pd.DataFrame(Z, columns=pca_col_names)
+
+            # 3. (חשוב!) שימוש באינדקס של X כדי לחבר לנתונים המקוריים
+            #    האינדקס של X הוא האינדקס *אחרי* מחיקת שורות (dropna)
+            pca_df.index = X.index
+
+            # 4. בחירת עמודות המזהים (subject + timepoint) מה-df המקורי
+            #    תוך שימוש באינדקס של X כדי לקבל רק את השורות הרלוונטיות
+            id_cols_to_grab = [subject_id_col]
+            if 'timepoint' in df.columns:
+                id_cols_to_grab.append('timepoint')
+
+            identifiers_df = df.loc[X.index, id_cols_to_grab]
+
+            # 5. חיבור של המזהים ורכיבי ה-PCA יחד (זה לצד זה)
+            pca_with_ids_df = pd.concat([identifiers_df, pca_df], axis=1)
+
+            # 6. שמירה לקובץ CSV
+            pca_with_ids_df.to_csv(save_pca_csv, index=False)
+            print(f"\n✅ נתוני PCA נשמרו בהצלחה ב: {save_pca_csv}")
+
+        except Exception as e:
+            print(f"\n⚠️ אזהרה: לא ניתן היה לשמור את קובץ ה-PCA. שגיאה: {e}")
     # 4) בחירת k לפי סילואט + גרף
     ks = list(k_range)
     sil_scores = []
@@ -364,14 +416,25 @@ from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 import numpy as np
 
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+
+import os
+# (ודא שכל שאר הייבואים שלך נמצאים בראש הקובץ)
+
 def run_kmeans_clustering(
-    df,
-    prefix,
-    n_components,
-    k,
-    plot=True,
-    title="k_means_plot",
-    csv_path=None
+        df,
+        prefix,
+        n_components,
+        k,
+        plot=True,
+        title="k_means_plot",
+        csv_path=None,
+        pc1_csv_path=None  # <-- פרמטר חדש שהוספנו
 ):
     """
     מבצע ניתוח PCA ו-K-Means על נתונים.
@@ -385,12 +448,14 @@ def run_kmeans_clustering(
         plot (bool): האם להציג גרף פיזור של האשכולות.
         title (str): כותרת הגרף.
         csv_path (str, optional): נתיב לשמירת תוצאות האשכולות לקובץ CSV.
+        pc1_csv_path (str, optional): נתיב לשמירת Subject_Code ו-PC1.  <-- תוספת
 
     Returns:
         tuple: תוויות האשכולות, נתוני PCA, אובייקט KMeans, אובייקט PCA.
     """
     # 1) סינון עמודות וטיפול בערכים חסרים
-    data_columns = [c for c in df.columns if c.startswith(prefix) and 'lec' not in c and c != 'Subject_Code']
+    data_columns = [c for c in df.columns if
+                    c.startswith(prefix) and 'lec' not in c and c not in ['Subject_Code', 'timepoint']]
     df_sub = df[data_columns].copy()
     df_sub = df_sub.apply(pd.to_numeric, errors='coerce').fillna(df_sub.mean())
 
@@ -410,7 +475,7 @@ def run_kmeans_clustering(
     kmeans = KMeans(n_clusters=k, n_init='auto', random_state=None)
     labels = kmeans.fit_predict(data_pca)
 
-    # 5) שמירת תוצאות ל-CSV
+    # 5) שמירת תוצאות ל-CSV (שיוך לאשכולות)
     if csv_path:
         if "Subject_Code" not in df.columns:
             print("Warning: 'Subject_Code' column not found, cannot save to CSV.")
@@ -421,6 +486,32 @@ def run_kmeans_clustering(
             }, index=df_sub.index)
             out.to_csv(csv_path, index=False, encoding='utf-8-sig')
             print(f"Cluster assignments saved to {csv_path}")
+
+    # ==========================================================
+    #           👇 תוספת 5.5: שמירת PC1 ל-CSV 👇
+    # ==========================================================
+    if pc1_csv_path:
+        if "Subject_Code" not in df.columns:
+            print("Warning: 'Subject_Code' column not found, cannot save PC1 to CSV.")
+        elif data_pca.shape[1] < 1:
+            print("Warning: No PCA components found, cannot save PC1.")
+        else:
+            # data_pca[:, 0] שולף את העמודה הראשונה (PC1)
+            pc1_out = pd.DataFrame({
+                "Subject_Code": df.loc[df_sub.index, "Subject_Code"],
+                "PC1": data_pca[:, 0]
+            }, index=df_sub.index)
+
+            # וידוא שהתיקייה קיימת (אם הנתיב כולל תיקייה)
+            pc1_dir = os.path.dirname(pc1_csv_path)
+            if pc1_dir and not os.path.exists(pc1_dir):
+                os.makedirs(pc1_dir, exist_ok=True)
+
+            pc1_out.to_csv(pc1_csv_path, index=False, encoding='utf-8-sig')
+            print(f"PC1 values saved to {pc1_csv_path}")
+    # ==========================================================
+    #                     👆 סוף התוספת 👆
+    # ==========================================================
 
     # 6) הצגת גרף פיזור
     if plot and data_pca.shape[1] >= 2:
@@ -530,7 +621,6 @@ def align_clusters_to_previous(
 
 
 
-import pandas as pd
 
 def invert_binary_columns(input_path, output_path, column_names):
     """
@@ -565,4 +655,56 @@ def invert_binary_columns(input_path, output_path, column_names):
 
     print(f"✅ File saved to {output_path}")
 
+
+
+
+def gap_statistic(X, n_refs=10, max_clusters=10, k_min=1, random_state=None):
+    """
+    Compute Gap Statistic for k in [k_min, max_clusters].
+    Returns (results_df, optimal_k), where results_df has columns ['k','gap','sk'].
+    """
+    if max_clusters < k_min or k_min < 1:
+        raise ValueError("Require 1 <= k_min <= max_clusters.")
+
+    rng = np.random.default_rng(random_state)
+
+    # Scale data
+    X = StandardScaler().fit_transform(X)
+
+    # Bounds for reference data (in scaled space)
+    shape = X.shape
+    min_vals, max_vals = X.min(axis=0), X.max(axis=0)
+
+    ks, gaps, sks = [], [], []
+
+    for k in range(k_min, max_clusters + 1):
+        # Wk for real data
+        km = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+        km.fit(X)
+        Wk = np.log(np.min(pairwise_distances(X, km.cluster_centers_), axis=1).sum())
+
+        # Wk for reference datasets
+        Wkb = []
+        for _ in range(n_refs):
+            X_ref = rng.uniform(min_vals, max_vals, size=shape)
+            km_ref = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+            km_ref.fit(X_ref)
+            Wkb.append(np.log(np.min(pairwise_distances(X_ref, km_ref.cluster_centers_), axis=1).sum()))
+        Wkb = np.asarray(Wkb)
+
+        ks.append(k)
+        gaps.append(Wkb.mean() - Wk)
+        # Tibshirani: sd * sqrt(1 + 1/B). Using sample sd (ddof=1) is common:
+        sks.append(Wkb.std(ddof=1) * np.sqrt(1 + 1/n_refs))
+
+    results_df = pd.DataFrame({"k": ks, "gap": gaps, "sk": sks})
+
+    # Choose k: smallest k such that gap(k) >= gap(k+1) - s_{k+1}
+    optimal_k = ks[-1]  # fallback
+    for i in range(len(results_df) - 1):
+        if results_df.loc[i, "gap"] >= results_df.loc[i + 1, "gap"] - results_df.loc[i + 1, "sk"]:
+            optimal_k = int(results_df.loc[i, "k"])
+            break
+
+    return results_df, optimal_k
 
